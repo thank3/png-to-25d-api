@@ -1,0 +1,10 @@
+node_modules/
+tasks/
+output_unzip/
+obj_viewer/
+tools/
+*.log
+test_convert_playwright*.js
+preview_gltf*.js
+test.html
+transfer_params.txt
