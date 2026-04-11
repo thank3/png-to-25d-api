@@ -31,6 +31,8 @@ app.use(express.json({ limit: '50mb' }));
 
 app.get('/health', (req, res) => res.send('OK'));
 
+app.get('/', (req, res) => res.send('PNG to 2.5D Multi-View API is running.'));
+
 /**
  * 核心转换接口
  * 请求体参数：
@@ -176,7 +178,7 @@ app.post('/convert', async (req, res) => {
         console.log(`[${taskId}] 转换成功，生成 ${outputUrls.length} 张预览图`);
         res.json({
             status: 'success',
-            result_urls: outputUrls,  // 返回数组，每个元素包含视角和公网URL
+            result_urls: outputUrls,
             message: '多视角生成成功'
         });
 
@@ -196,7 +198,7 @@ app.listen(PORT, () => {
 });
 
 /**
- * 生成 HTML 页面，支持多视角渲染
+ * 生成 HTML 页面，支持多视角渲染（已优化相机与材质）
  */
 function generateHtml(pngDataUrl, params, taskId, views) {
     // 将视角数组转换为 JS 数组字面量
@@ -311,18 +313,30 @@ function generateHtml(pngDataUrl, params, taskId, views) {
 
                 updateProgress(70, '模型生成完成');
 
-                // 强化哑光效果
+                // 强化纹理显示，避免过曝或颜色丢失（支持材质数组）
                 object3D.traverse(child => {
                     if (child.isMesh) {
                         const mat = child.material;
                         if (mat) {
-                            if (mat.isMeshStandardMaterial || mat.isMeshPhongMaterial) {
-                                mat.roughness = 0.85;
-                                mat.metalness = 0.05;
-                                mat.emissive = new THREE.Color(0x000000);
-                                mat.emissiveIntensity = 0;
+                            if (Array.isArray(mat)) {
+                                mat.forEach(m => {
+                                    if (m.isMeshStandardMaterial || m.isMeshPhongMaterial) {
+                                        m.roughness = 0.6;
+                                        m.metalness = 0.0;
+                                        m.emissive = new THREE.Color(0x000000);
+                                        m.emissiveIntensity = 0;
+                                        m.needsUpdate = true;
+                                    }
+                                });
+                            } else {
+                                if (mat.isMeshStandardMaterial || mat.isMeshPhongMaterial) {
+                                    mat.roughness = 0.6;
+                                    mat.metalness = 0.0;
+                                    mat.emissive = new THREE.Color(0x000000);
+                                    mat.emissiveIntensity = 0;
+                                    mat.needsUpdate = true;
+                                }
                             }
-                            mat.needsUpdate = true;
                         }
                     }
                 });
@@ -368,11 +382,25 @@ function generateHtml(pngDataUrl, params, taskId, views) {
                 backLight.position.set(0, 2, -8);
                 scene.add(backLight);
 
-                // 定义相机位置映射
+                // 增加正面补光，确保纹理清晰可见
+                const fillLight = new THREE.DirectionalLight(0xffeedd, 0.25);
+                fillLight.position.set(0, size.y * 0.5, size.z * 3);
+                scene.add(fillLight);
+
+                // 定义相机位置映射（已优化：正面清晰，透视45度立体）
                 const cameraPositions = {
-                    front: { pos: [0, size.y * 0.5, size.z * 2.5], lookAt: [0, size.y * 0.5, 0] },
-                    perspective: { pos: [size.x * 1.8, size.y * 0.8, size.z * 2.2], lookAt: [0, size.y * 0.4, 0] },
-                    side: { pos: [size.x * 2.5, size.y * 0.5, 0], lookAt: [0, size.y * 0.5, 0] }
+                    front: {
+                        pos: [0, size.y * 0.5, Math.max(size.x, size.y, size.z) * 2.8],
+                        lookAt: [0, size.y * 0.5, 0]
+                    },
+                    perspective: {
+                        pos: [size.x * 1.5, size.y * 0.6, size.z * 2.0],
+                        lookAt: [0, size.y * 0.4, 0]
+                    },
+                    side: {
+                        pos: [size.x * 2.5, size.y * 0.5, 0],
+                        lookAt: [0, size.y * 0.5, 0]
+                    }
                 };
 
                 const screenshots = [];
