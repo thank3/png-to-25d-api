@@ -21,6 +21,13 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '50mb' }));
 
+// 静态托管 outputs 目录，用于提供生成的图片
+const outputsDir = path.join(__dirname, 'outputs');
+if (!fs.existsSync(outputsDir)) {
+    fs.mkdirSync(outputsDir, { recursive: true });
+}
+app.use('/outputs', express.static(outputsDir));
+
 app.get('/health', (req, res) => res.send('OK'));
 
 app.post('/convert', async (req, res) => {
@@ -122,8 +129,27 @@ app.post('/convert', async (req, res) => {
         const screenshotBase64 = result.screenshot;
         if (!screenshotBase64) throw new Error('无法获取预览图');
 
-        console.log(`[${taskId}] 转换成功`);
-        res.json({ status: 'success', result_url: screenshotBase64 });
+        // ---------- 关键修改：将 Base64 图片保存为文件，返回 URL ----------
+        // 提取 Base64 数据（去掉 data:image/png;base64, 前缀）
+        const base64Data = screenshotBase64.replace(/^data:image\/png;base64,/, '');
+        const imageBuffer2 = Buffer.from(base64Data, 'base64');
+        
+        // 输出文件名：outputs/taskId.png
+        const outputFileName = `${taskId}.png`;
+        const outputFilePath = path.join(outputsDir, outputFileName);
+        fs.writeFileSync(outputFilePath, imageBuffer2);
+        
+        // 构造公网 URL（注意：Render 部署后，协议是 https，域名是 app 的默认域名）
+        // 获取请求的 host，以便动态构造 URL
+        const host = req.get('host');
+        const protocol = req.protocol;
+        const resultUrl = `${protocol}://${host}/outputs/${outputFileName}`;
+        
+        console.log(`[${taskId}] 转换成功，图片保存至: ${outputFilePath}`);
+        console.log(`[${taskId}] 返回 URL: ${resultUrl}`);
+        
+        // 返回 URL 而非 Base64
+        res.json({ status: 'success', result_url: resultUrl });
 
     } catch (error) {
         console.error(`[${taskId}] 错误:`, error);
@@ -140,6 +166,7 @@ app.listen(PORT, () => {
 });
 
 function generateHtml(pngDataUrl, params, taskId) {
+    // 保持原有的 generateHtml 函数不变
     return `<!DOCTYPE html>
 <html>
 <head>
