@@ -9,14 +9,14 @@ const os = require('os');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// 静态文件托管目录
+// 静态文件托管目录：用于存放生成的预览图，供外部访问
 const PUBLIC_DIR = path.join(__dirname, 'public');
 if (!fs.existsSync(PUBLIC_DIR)) {
     fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 }
 app.use('/outputs', express.static(PUBLIC_DIR));
 
-// CORS
+// CORS 配置
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
@@ -32,12 +32,16 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/health', (req, res) => res.send('OK'));
 app.get('/', (req, res) => res.send('PNG to 2.5D Multi-View API is running.'));
 
+/**
+ * 核心转换接口 —— 基于初始稳定版本，仅增加多视角支持
+ */
 app.post('/convert', async (req, res) => {
     const { image_url, views = ['front', 'perspective'] } = req.body;
     if (!image_url) {
         return res.status(400).json({ status: 'error', message: '缺少 image_url 参数' });
     }
 
+    // 过滤合法视角
     const validViews = ['front', 'perspective', 'side'];
     const selectedViews = views.filter(v => validViews.includes(v));
     if (selectedViews.length === 0) {
@@ -55,30 +59,19 @@ app.post('/convert', async (req, res) => {
     try {
         console.log(`[${taskId}] 开始处理，视角：${selectedViews.join(', ')}`);
 
-        // 下载图片
+        // 下载原图
         const imageResponse = await fetch(image_url);
         if (!imageResponse.ok) throw new Error(`下载图片失败: ${imageResponse.status}`);
         const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
         const pngBase64 = imageBuffer.toString('base64');
+        // 关键：使用 data URL，与你最初成功的版本一致
+        const pngDataUrl = `data:image/png;base64,${pngBase64}`;
 
-        // 复制 resources
+        // 复制 resources 目录
         const resourcesSrc = path.join(__dirname, 'resources');
         if (!fs.existsSync(resourcesSrc)) throw new Error('resources 文件夹不存在');
         const resourcesDest = path.join(taskDir, 'resources');
         fs.cpSync(resourcesSrc, resourcesDest, { recursive: true });
-
-        // 确保 earcut 库存在于 resources/js/ 中（如果不存在，动态下载）
-        const earcutPath = path.join(resourcesDest, 'js', 'earcut.min.js');
-        if (!fs.existsSync(earcutPath)) {
-            console.log('正在下载 earcut.min.js...');
-            const earcutResponse = await fetch('https://cdnjs.cloudflare.com/ajax/libs/earcut/2.2.4/earcut.min.js');
-            if (earcutResponse.ok) {
-                const earcutContent = await earcutResponse.text();
-                fs.writeFileSync(earcutPath, earcutContent);
-            } else {
-                console.warn('无法下载 earcut，将尝试使用内置回退');
-            }
-        }
 
         const params = {
             '宽度': '400',
@@ -89,10 +82,12 @@ app.post('/convert', async (req, res) => {
             '边框': '不勾选'
         };
 
-        const html = generateHtml(pngBase64, params, taskId, selectedViews);
+        // 生成 HTML，传入视角列表
+        const html = generateHtml(pngDataUrl, params, taskId, selectedViews);
         const htmlPath = path.join(taskDir, 'index.html');
         fs.writeFileSync(htmlPath, html, 'utf-8');
 
+        // 启动静态服务器
         server = http.createServer((req, res) => {
             let filePath = path.join(taskDir, req.url === '/' ? 'index.html' : req.url);
             const extname = String(path.extname(filePath)).toLowerCase();
@@ -115,6 +110,7 @@ app.post('/convert', async (req, res) => {
         await new Promise(resolve => server.listen(serverPort, resolve));
         console.log(`[${taskId}] 静态服务器端口: ${serverPort}`);
 
+        // 启动浏览器
         browser = await chromium.launch({
             headless: true,
             args: [
@@ -131,6 +127,7 @@ app.post('/convert', async (req, res) => {
 
         await page.goto(`http://localhost:${serverPort}/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
+        // 等待转换完成，获取截图数组（Base64格式）
         const result = await page.evaluate((targetViews) => {
             return new Promise((resolve) => {
                 const check = setInterval(() => {
@@ -141,25 +138,23 @@ app.post('/convert', async (req, res) => {
                 }, 500);
                 setTimeout(() => {
                     clearInterval(check);
-                    resolve({ success: false, error: '转换超时 (5分钟)' });
+                    resolve({ success: false, error: '转换超时' });
                 }, 300000);
             });
         }, selectedViews);
 
-        if (!result || !result.success) {
-            throw new Error(result?.error || '未知转换错误');
-        }
+        if (!result || !result.success) throw new Error(result?.error || '转换失败');
 
-        const screenshots = result.screenshots;
+        const screenshots = result.screenshots; // 数组，每个元素为 { view, base64 }
         if (!screenshots || screenshots.length === 0) throw new Error('无法获取预览图');
 
+        // 保存图片到 public 目录，并生成公网 URL
         const outputUrls = [];
         const host = req.get('host');
         const protocol = req.protocol;
 
         for (let i = 0; i < screenshots.length; i++) {
             const item = screenshots[i];
-            // 转换为 JPEG 以减小文件大小并避免 GPU stall（可选）
             const base64Data = item.base64.replace(/^data:image\/png;base64,/, '');
             const buffer = Buffer.from(base64Data, 'base64');
             
@@ -196,7 +191,10 @@ app.listen(PORT, () => {
     console.log(`Public output directory: ${PUBLIC_DIR}`);
 });
 
-function generateHtml(pngBase64, params, taskId, views) {
+/**
+ * 生成 HTML 页面 —— 基于你最初稳定版本的渲染逻辑，仅增加多视角循环
+ */
+function generateHtml(pngDataUrl, params, taskId, views) {
     const viewsArrayStr = JSON.stringify(views);
     
     return `<!DOCTYPE html>
@@ -222,7 +220,6 @@ function generateHtml(pngBase64, params, taskId, views) {
         window.conversionResult = undefined;
 
         const targetViews = ${viewsArrayStr};
-        const pngBase64 = '${pngBase64}';
 
         function updateProgress(percent, message) {
             document.getElementById('progress-bar').style.width = percent + '%';
@@ -244,19 +241,6 @@ function generateHtml(pngBase64, params, taskId, views) {
                     });
                 }
 
-                // 加载本地 earcut（如果存在）
-                try {
-                    await loadScript('resources/js/earcut.min.js');
-                    console.log('使用本地 earcut');
-                } catch(e) {
-                    console.warn('本地 earcut 缺失，尝试动态加载 CDN...');
-                    try {
-                        await loadScript('https://cdnjs.cloudflare.com/ajax/libs/earcut/2.2.4/earcut.min.js');
-                    } catch(e2) {
-                        console.error('earcut 加载失败，将使用内置回退');
-                    }
-                }
-
                 await loadScript('resources/js/utils.js');
                 await loadScript('resources/js/inflate.min.js');
                 await loadScript('resources/js/three-pass-extensions.js');
@@ -264,30 +248,25 @@ function generateHtml(pngBase64, params, taskId, views) {
                 await loadScript('resources/js/exporter.min.js');
                 await loadScript('resources/js/jszip.min.js');
                 await loadScript('resources/js/GLTFExporter.js');
+                
+                try {
+                    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/earcut/2.2.2/earcut.min.js');
+                } catch(e) { console.warn('earcut 回退'); }
 
                 updateProgress(30, '脚本OK');
 
                 const params = ${JSON.stringify(params)};
-
-                // Base64 转 Blob URL
-                const byteCharacters = atob(pngBase64);
-                const byteNumbers = new Array(byteCharacters.length);
-                for (let i = 0; i < byteCharacters.length; i++) {
-                    byteNumbers[i] = byteCharacters.charCodeAt(i);
-                }
-                const byteArray = new Uint8Array(byteNumbers);
-                const blob = new Blob([byteArray], { type: 'image/png' });
-                const imageUrl = URL.createObjectURL(blob);
+                const imageUrl = '${pngDataUrl}';
 
                 const renderer = new THREE.WebGLRenderer({ preserveDrawingBuffer: true, antialias: true, alpha: false });
-                renderer.setSize(600, 600);
+                renderer.setSize(400, 400);
                 renderer.setClearColor(0xebebeb, 1);
 
                 updateProgress(40, '加载图片');
                 const img = new Image();
                 await new Promise((resolve, reject) => {
                     img.onload = resolve;
-                    img.onerror = () => reject(new Error('图片加载失败'));
+                    img.onerror = reject;
                     img.src = imageUrl;
                 });
 
@@ -310,48 +289,32 @@ function generateHtml(pngBase64, params, taskId, views) {
                 };
 
                 console.log('Options:', options);
-                
-                let object3D;
-                try {
-                    const imageObject = new window.ImageObject(renderer, options);
-                    object3D = await new Promise((resolve, reject) => {
-                        imageObject.onload(async function(obj) {
-                            try {
-                                const result = await imageObject.getObject(renderer);
-                                console.log('模型生成成功');
-                                resolve(result);
-                            } catch(e) { reject(e); }
-                        });
-                        setTimeout(() => reject(new Error('模型生成超时')), 120000);
+                const imageObject = new window.ImageObject(renderer, options);
+                const object3D = await new Promise((resolve, reject) => {
+                    imageObject.onload(async function(obj) {
+                        try {
+                            const result = await imageObject.getObject(renderer);
+                            console.log('模型生成成功');
+                            resolve(result);
+                        } catch(e) { reject(e); }
                     });
-                } catch (modelError) {
-                    throw new Error('ImageObject 处理失败: ' + modelError.message);
-                }
+                    setTimeout(() => reject(new Error('模型生成超时')), 120000);
+                });
 
                 updateProgress(70, '模型生成完成');
 
-                // 材质设置
+                // ===== 材质设置：完全保留你最初的版本，不做任何改动 =====
                 object3D.traverse(child => {
                     if (child.isMesh) {
                         const mat = child.material;
                         if (mat) {
-                            const applySettings = (material) => {
-                                if (material.isMeshStandardMaterial || material.isMeshPhongMaterial) {
-                                    material.roughness = 0.6;
-                                    material.metalness = 0.0;
-                                    material.emissive = new THREE.Color(0x000000);
-                                    material.emissiveIntensity = 0;
-                                    if (!material.map) {
-                                        material.color.setHex(0xcccccc);
-                                    }
-                                    material.needsUpdate = true;
-                                }
-                            };
-                            if (Array.isArray(mat)) {
-                                mat.forEach(m => applySettings(m));
-                            } else {
-                                applySettings(mat);
+                            if (mat.isMeshStandardMaterial || mat.isMeshPhongMaterial) {
+                                mat.roughness = 0.85;
+                                mat.metalness = 0.05;
+                                mat.emissive = new THREE.Color(0x000000);
+                                mat.emissiveIntensity = 0;
                             }
+                            mat.needsUpdate = true;
                         }
                     }
                 });
@@ -365,6 +328,7 @@ function generateHtml(pngBase64, params, taskId, views) {
 
                 modelGroup.position.sub(center);
                 modelGroup.position.y += size.y / 2;
+
                 modelGroup.rotation.y = 0;
                 modelGroup.rotation.x = 0;
 
@@ -372,36 +336,35 @@ function generateHtml(pngBase64, params, taskId, views) {
                 scene.background = new THREE.Color(0xebebeb);
                 scene.add(modelGroup);
 
-                const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+                // ===== 灯光设置：完全保留你最初的版本 =====
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
                 scene.add(ambientLight);
                 
-                const frontLight = new THREE.DirectionalLight(0xffffff, 0.4);
+                const frontLight = new THREE.DirectionalLight(0xffffff, 0.35);
                 frontLight.position.set(0, 0, 10);
                 scene.add(frontLight);
                 
-                const topLight = new THREE.DirectionalLight(0xffffff, 0.3);
+                const topLight = new THREE.DirectionalLight(0xffffff, 0.25);
                 topLight.position.set(0, 5, 5);
                 scene.add(topLight);
                 
-                const sideLight1 = new THREE.DirectionalLight(0xffeedd, 0.2);
+                const sideLight1 = new THREE.DirectionalLight(0xffeedd, 0.15);
                 sideLight1.position.set(5, 2, 5);
                 scene.add(sideLight1);
                 
-                const sideLight2 = new THREE.DirectionalLight(0xddddff, 0.2);
+                const sideLight2 = new THREE.DirectionalLight(0xddddff, 0.15);
                 sideLight2.position.set(-5, 2, 5);
                 scene.add(sideLight2);
 
-                const backLight = new THREE.DirectionalLight(0xffffff, 0.15);
+                const backLight = new THREE.DirectionalLight(0xffffff, 0.1);
                 backLight.position.set(0, 2, -8);
                 scene.add(backLight);
 
-                const fillLight = new THREE.DirectionalLight(0xffeedd, 0.3);
-                fillLight.position.set(0, size.y * 0.5, size.z * 3);
-                scene.add(fillLight);
-
+                // 定义相机位置映射
+                // front 使用你最初成功的相机参数
                 const cameraPositions = {
                     front: {
-                        pos: [0, size.y * 0.5, Math.max(size.x, size.y, size.z) * 2.8],
+                        pos: [0, size.y * 0.5, Math.max(size.x, size.y, size.z) * 1.8],
                         lookAt: [0, size.y * 0.5, 0]
                     },
                     perspective: {
@@ -416,6 +379,7 @@ function generateHtml(pngBase64, params, taskId, views) {
 
                 const screenshots = [];
 
+                // 为每个视角渲染并截图
                 for (let i = 0; i < targetViews.length; i++) {
                     const viewName = targetViews[i];
                     const camConfig = cameraPositions[viewName] || cameraPositions.front;
@@ -443,17 +407,10 @@ function generateHtml(pngBase64, params, taskId, views) {
                     success: true, 
                     screenshots: screenshots 
                 };
-                
-                URL.revokeObjectURL(imageUrl);
-                
             } catch(error) {
                 console.error('转换错误:', error);
                 updateProgress(0, '失败: ' + error.message);
-                window.conversionResult = { 
-                    success: false, 
-                    error: error.message,
-                    stack: error.stack
-                };
+                window.conversionResult = { success: false, error: error.message };
             }
         }
 
