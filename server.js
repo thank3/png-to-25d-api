@@ -192,7 +192,7 @@ app.listen(PORT, () => {
 });
 
 /**
- * 生成 HTML 页面 —— 基于你最初稳定版本的渲染逻辑，仅增加多视角循环
+ * 生成 HTML 页面 —— 基于你最初稳定版本的渲染逻辑，优化了透视视角相机
  */
 function generateHtml(pngDataUrl, params, taskId, views) {
     const viewsArrayStr = JSON.stringify(views);
@@ -360,16 +360,18 @@ function generateHtml(pngDataUrl, params, taskId, views) {
                 backLight.position.set(0, 2, -8);
                 scene.add(backLight);
 
-                // 定义相机位置映射
-                // front 使用你最初成功的相机参数
+                // ===== 定义相机位置映射 =====
+                // 优化后的透视视角：右前上方，视线指向模型中心偏正面方向，产生45°斜侧效果
                 const cameraPositions = {
                     front: {
                         pos: [0, size.y * 0.5, Math.max(size.x, size.y, size.z) * 1.8],
                         lookAt: [0, size.y * 0.5, 0]
                     },
                     perspective: {
-                        pos: [size.x * 1.5, size.y * 0.6, size.z * 2.0],
-                        lookAt: [0, size.y * 0.4, 0]
+                        // 相机位于右前上方，更靠右、更高、稍远
+                        pos: [size.x * 2.2, size.y * 0.9, size.z * 2.8],
+                        // 观察点偏向模型正面偏右的位置，既能保留右侧轮廓又能看到正面细节
+                        lookAt: [size.x * 0.3, size.y * 0.5, size.z * 0.4]
                     },
                     side: {
                         pos: [size.x * 2.5, size.y * 0.5, 0],
