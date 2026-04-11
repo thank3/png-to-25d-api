@@ -9,14 +9,14 @@ const os = require('os');
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// 静态文件托管目录：用于存放生成的预览图，供外部访问
+// 静态文件托管目录
 const PUBLIC_DIR = path.join(__dirname, 'public');
 if (!fs.existsSync(PUBLIC_DIR)) {
     fs.mkdirSync(PUBLIC_DIR, { recursive: true });
 }
 app.use('/outputs', express.static(PUBLIC_DIR));
 
-// CORS 配置
+// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
@@ -32,9 +32,6 @@ app.use(express.json({ limit: '50mb' }));
 app.get('/health', (req, res) => res.send('OK'));
 app.get('/', (req, res) => res.send('PNG to 2.5D Multi-View API is running.'));
 
-/**
- * 核心转换接口
- */
 app.post('/convert', async (req, res) => {
     const { image_url, views = ['front', 'perspective'] } = req.body;
     if (!image_url) {
@@ -58,17 +55,30 @@ app.post('/convert', async (req, res) => {
     try {
         console.log(`[${taskId}] 开始处理，视角：${selectedViews.join(', ')}`);
 
-        // 下载原图
+        // 下载图片
         const imageResponse = await fetch(image_url);
         if (!imageResponse.ok) throw new Error(`下载图片失败: ${imageResponse.status}`);
         const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
         const pngBase64 = imageBuffer.toString('base64');
 
-        // 复制 resources 目录
+        // 复制 resources
         const resourcesSrc = path.join(__dirname, 'resources');
         if (!fs.existsSync(resourcesSrc)) throw new Error('resources 文件夹不存在');
         const resourcesDest = path.join(taskDir, 'resources');
         fs.cpSync(resourcesSrc, resourcesDest, { recursive: true });
+
+        // 确保 earcut 库存在于 resources/js/ 中（如果不存在，动态下载）
+        const earcutPath = path.join(resourcesDest, 'js', 'earcut.min.js');
+        if (!fs.existsSync(earcutPath)) {
+            console.log('正在下载 earcut.min.js...');
+            const earcutResponse = await fetch('https://cdnjs.cloudflare.com/ajax/libs/earcut/2.2.4/earcut.min.js');
+            if (earcutResponse.ok) {
+                const earcutContent = await earcutResponse.text();
+                fs.writeFileSync(earcutPath, earcutContent);
+            } else {
+                console.warn('无法下载 earcut，将尝试使用内置回退');
+            }
+        }
 
         const params = {
             '宽度': '400',
@@ -79,12 +89,10 @@ app.post('/convert', async (req, res) => {
             '边框': '不勾选'
         };
 
-        // 生成 HTML，传入 Base64 图片数据
         const html = generateHtml(pngBase64, params, taskId, selectedViews);
         const htmlPath = path.join(taskDir, 'index.html');
         fs.writeFileSync(htmlPath, html, 'utf-8');
 
-        // 启动静态服务器
         server = http.createServer((req, res) => {
             let filePath = path.join(taskDir, req.url === '/' ? 'index.html' : req.url);
             const extname = String(path.extname(filePath)).toLowerCase();
@@ -107,7 +115,6 @@ app.post('/convert', async (req, res) => {
         await new Promise(resolve => server.listen(serverPort, resolve));
         console.log(`[${taskId}] 静态服务器端口: ${serverPort}`);
 
-        // 启动浏览器
         browser = await chromium.launch({
             headless: true,
             args: [
@@ -119,22 +126,11 @@ app.post('/convert', async (req, res) => {
         });
 
         const page = await browser.newPage();
-        
-        // 收集浏览器控制台错误
-        const browserErrors = [];
-        page.on('console', msg => {
-            const text = msg.text();
-            console.log(`[浏览器] ${text}`);
-            if (msg.type() === 'error') browserErrors.push(text);
-        });
-        page.on('pageerror', err => {
-            console.error(`[浏览器页面错误] ${err.message}`);
-            browserErrors.push(err.message);
-        });
+        page.on('console', msg => console.log(`[浏览器] ${msg.text()}`));
+        page.on('pageerror', err => console.error(`[浏览器页面错误] ${err.message}`));
 
         await page.goto(`http://localhost:${serverPort}/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-        // 等待转换结果
         const result = await page.evaluate((targetViews) => {
             return new Promise((resolve) => {
                 const check = setInterval(() => {
@@ -150,28 +146,21 @@ app.post('/convert', async (req, res) => {
             });
         }, selectedViews);
 
-        // 如果有浏览器错误，附加到结果中
-        if (browserErrors.length > 0) {
-            result.browserErrors = browserErrors;
-        }
-
         if (!result || !result.success) {
-            const errorDetail = result?.error || '未知转换错误';
-            const browserInfo = browserErrors.length ? ` 浏览器错误: ${browserErrors.join('; ')}` : '';
-            throw new Error(errorDetail + browserInfo);
+            throw new Error(result?.error || '未知转换错误');
         }
 
         const screenshots = result.screenshots;
         if (!screenshots || screenshots.length === 0) throw new Error('无法获取预览图');
 
-        // 保存图片并生成公网 URL
         const outputUrls = [];
         const host = req.get('host');
         const protocol = req.protocol;
 
         for (let i = 0; i < screenshots.length; i++) {
             const item = screenshots[i];
-            const base64Data = item.base64.replace(/^data:image\/\w+;base64,/, '');
+            // 转换为 JPEG 以减小文件大小并避免 GPU stall（可选）
+            const base64Data = item.base64.replace(/^data:image\/png;base64,/, '');
             const buffer = Buffer.from(base64Data, 'base64');
             
             const filename = `${taskId}_${item.view}_${Date.now()}.png`;
@@ -207,9 +196,6 @@ app.listen(PORT, () => {
     console.log(`Public output directory: ${PUBLIC_DIR}`);
 });
 
-/**
- * 生成 HTML 页面（增强错误捕获，使用 Blob URL 加载图片）
- */
 function generateHtml(pngBase64, params, taskId, views) {
     const viewsArrayStr = JSON.stringify(views);
     
@@ -258,6 +244,19 @@ function generateHtml(pngBase64, params, taskId, views) {
                     });
                 }
 
+                // 加载本地 earcut（如果存在）
+                try {
+                    await loadScript('resources/js/earcut.min.js');
+                    console.log('使用本地 earcut');
+                } catch(e) {
+                    console.warn('本地 earcut 缺失，尝试动态加载 CDN...');
+                    try {
+                        await loadScript('https://cdnjs.cloudflare.com/ajax/libs/earcut/2.2.4/earcut.min.js');
+                    } catch(e2) {
+                        console.error('earcut 加载失败，将使用内置回退');
+                    }
+                }
+
                 await loadScript('resources/js/utils.js');
                 await loadScript('resources/js/inflate.min.js');
                 await loadScript('resources/js/three-pass-extensions.js');
@@ -265,16 +264,12 @@ function generateHtml(pngBase64, params, taskId, views) {
                 await loadScript('resources/js/exporter.min.js');
                 await loadScript('resources/js/jszip.min.js');
                 await loadScript('resources/js/GLTFExporter.js');
-                
-                try {
-                    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/earcut/2.2.2/earcut.min.js');
-                } catch(e) { console.warn('earcut 回退'); }
 
                 updateProgress(30, '脚本OK');
 
                 const params = ${JSON.stringify(params)};
 
-                // 将 Base64 转换为 Blob URL，确保兼容性
+                // Base64 转 Blob URL
                 const byteCharacters = atob(pngBase64);
                 const byteNumbers = new Array(byteCharacters.length);
                 for (let i = 0; i < byteCharacters.length; i++) {
@@ -284,7 +279,6 @@ function generateHtml(pngBase64, params, taskId, views) {
                 const blob = new Blob([byteArray], { type: 'image/png' });
                 const imageUrl = URL.createObjectURL(blob);
 
-                // 创建渲染器
                 const renderer = new THREE.WebGLRenderer({ preserveDrawingBuffer: true, antialias: true, alpha: false });
                 renderer.setSize(600, 600);
                 renderer.setClearColor(0xebebeb, 1);
@@ -336,7 +330,7 @@ function generateHtml(pngBase64, params, taskId, views) {
 
                 updateProgress(70, '模型生成完成');
 
-                // 材质强化与纹理检查
+                // 材质设置
                 object3D.traverse(child => {
                     if (child.isMesh) {
                         const mat = child.material;
@@ -347,9 +341,7 @@ function generateHtml(pngBase64, params, taskId, views) {
                                     material.metalness = 0.0;
                                     material.emissive = new THREE.Color(0x000000);
                                     material.emissiveIntensity = 0;
-                                    // 如果纹理丢失，给一个基础颜色防止完全透明
                                     if (!material.map) {
-                                        console.warn('材质缺少纹理，使用基础色');
                                         material.color.setHex(0xcccccc);
                                     }
                                     material.needsUpdate = true;
@@ -376,7 +368,6 @@ function generateHtml(pngBase64, params, taskId, views) {
                 modelGroup.rotation.y = 0;
                 modelGroup.rotation.x = 0;
 
-                // 场景与灯光
                 const scene = new THREE.Scene();
                 scene.background = new THREE.Color(0xebebeb);
                 scene.add(modelGroup);
@@ -408,7 +399,6 @@ function generateHtml(pngBase64, params, taskId, views) {
                 fillLight.position.set(0, size.y * 0.5, size.z * 3);
                 scene.add(fillLight);
 
-                // 相机位置
                 const cameraPositions = {
                     front: {
                         pos: [0, size.y * 0.5, Math.max(size.x, size.y, size.z) * 2.8],
@@ -454,7 +444,6 @@ function generateHtml(pngBase64, params, taskId, views) {
                     screenshots: screenshots 
                 };
                 
-                // 清理 Blob URL
                 URL.revokeObjectURL(imageUrl);
                 
             } catch(error) {
