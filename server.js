@@ -63,8 +63,8 @@ app.post('/convert', async (req, res) => {
             '宽度': '400',
             '深度': depth_mm.toString(),
             '保存格式': 'gltf',
-            '宽度细分': '400',
-            '高度细分': '400',
+            '宽度细分': '150',
+            '高度细分': '150',
             '边框': '不勾选'
         };
 
@@ -340,7 +340,7 @@ function generateHtml(pngDataUrl, params, views, exportFormat, width_mm, depth_m
                 const params = ${JSON.stringify(params)};
                 const imageUrl = '${pngDataUrl}';
                 const renderer = new THREE.WebGLRenderer({ preserveDrawingBuffer: true, antialias: true, alpha: false });
-                renderer.setSize(400, 400);
+                renderer.setSize(256, 256);
                 renderer.setClearColor(0xffffff, 1);
 
                 const img = new Image();
