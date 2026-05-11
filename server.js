@@ -159,7 +159,7 @@ app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
 
-// 生成 HTML（同样修复了 Base64 问题）
+// 生成 HTML（已加入垂直翻转修复）
 function generateHtml(pngDataUrl, params, views, exportFormat, width_mm, depth_mm) {
     const viewsArrayStr = JSON.stringify(views);
     return `<!DOCTYPE html>
@@ -338,13 +338,26 @@ function generateHtml(pngDataUrl, params, views, exportFormat, width_mm, depth_m
 
                 updateProgress(25, '脚本完成');
                 const params = ${JSON.stringify(params)};
-                const imageUrl = '${pngDataUrl}';
+                const rawImageUrl = '${pngDataUrl}';
                 const renderer = new THREE.WebGLRenderer({ preserveDrawingBuffer: true, antialias: true, alpha: false });
                 renderer.setSize(256, 256);
                 renderer.setClearColor(0xffffff, 1);
 
+                // 加载原始图片
                 const img = new Image();
-                await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = imageUrl; });
+                await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = rawImageUrl; });
+
+                // ====== 垂直翻转图片（修复上下颠倒） ======
+                const flipCanvas = document.createElement('canvas');
+                flipCanvas.width = img.naturalWidth;
+                flipCanvas.height = img.naturalHeight;
+                const flipCtx = flipCanvas.getContext('2d');
+                flipCtx.translate(0, flipCanvas.height);
+                flipCtx.scale(1, -1);
+                flipCtx.drawImage(img, 0, 0);
+                const flippedImageUrl = flipCanvas.toDataURL('image/png');
+                // ========================================
+
                 const w = img.naturalWidth, h = img.naturalHeight;
                 const targetWidth = Math.min(parseInt(params['宽度']) || 400, 600);
                 const targetHeight = Math.round(targetWidth / (w/h));
@@ -353,7 +366,8 @@ function generateHtml(pngDataUrl, params, views, exportFormat, width_mm, depth_m
 
                 updateProgress(40, '生成曲面');
                 const options = {
-                    url: imageUrl, tool: 0, width: targetWidth, widthSegments,
+                    url: flippedImageUrl, // ← 使用翻转后的图片
+                    tool: 0, width: targetWidth, widthSegments,
                     height: targetHeight, heightSegments,
                     depth: parseFloat(params['深度']) || ${depth_mm},
                     border: params['边框'] === '勾选'
@@ -418,7 +432,7 @@ function generateHtml(pngDataUrl, params, views, exportFormat, width_mm, depth_m
                 let modelBase64;
                 if ('${exportFormat}' === 'stl') {
                     const stlBytes = exportSTLBinary(modelGroup);
-                    modelBase64 = uint8ArrayToBase64(stlBytes);  // ← 修复处
+                    modelBase64 = uint8ArrayToBase64(stlBytes);
                 } else {
                     const exporter = new THREE.GLTFExporter();
                     const glb = await new Promise(resolve => exporter.parse(modelGroup, resolve, { binary: true }));
